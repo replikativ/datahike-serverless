@@ -45,7 +45,7 @@ exists only so the breakdown is recoverable from a local run.
 ## Deploying to real AWS
 
 **Not done, and not scripted.** There is no Terraform here yet
-([issue](https://github.com/replikativ/datahike-serverless/issues)). What a
+([#1](https://github.com/replikativ/datahike-serverless/issues/1)). What a
 deployment has to get right, from the measurements:
 
 - **Two functions, not one.** A reader function with no concurrency limit; a writer

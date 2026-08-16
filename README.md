@@ -86,6 +86,32 @@ Warming at INIT pays **only when INIT is amortised**:
 
 So it is off by default (`DHS_WARM_TENANTS=""`). Do not enable it blind.
 
+**Measured again in this repo, it came out the other way — and the reason is worth
+more than either number.** Two fresh reader containers, identical but for
+`DHS_WARM_TENANTS`, on a 400-note tenant (RIE + MinIO on localhost):
+
+| | INIT | FIRST invoke | first GETs | cold path |
+|---|--:|--:|--:|--:|
+| no warm | 63 ms | 2281 ms | 15 | 2344 ms |
+| warm at INIT | 539 ms | **504 ms** | **1** | **1044 ms** |
+
+A clear win, where the prototype measured a slight loss. Two differences, both of
+which you can check for your own workload:
+
+- **Over-fetch.** The prototype's warm fetched 24 GETs where the query needed 18,
+  at +20 ms RTT, and paid for the extra six. Here the warm fetched exactly the 15
+  the query would have — `d/warm-db` reported `{:fetched 11 :rounds 1 :by-index
+  {:eavt 6 :aevt 5}}` — so there was nothing to lose. Tune `:depth`/`:budget` and
+  watch that report.
+- **Class loading again.** Walking the index at INIT loads the connect/fetch
+  namespaces there, leaving the first invocation only the query path to load: 2281
+  ms → 504 ms *on one GET*. That saving is not object-store work at all and is
+  invisible in a GET count.
+
+On real S3, with real RTT, the over-fetch term grows and this can flip back. The
+honest rule is not "warm always pays" or "warm never pays" — it is *measure it, and
+watch whether the warm fetches more than the query does*.
+
 ### Writes
 
 | | PUTs | time |
@@ -253,12 +279,13 @@ forever, silently.
 | | |
 |---|---|
 | **Clojure-only Lambda path** | Verified end-to-end in this repo: RIE + MinIO, write through the writer function, cold and warm reads through the reader, phases logged. The headline numbers above are the *source prototype's*, on a 201-record tenant; this repo's own run (one-note tenant, `:this-repo` in `doc/measurements.edn`) confirms the path works and the phase structure holds, and is far too small to restate them. |
-| **Uberjar build** | `clj -T:build uber` verified in this repo. |
-| **Example app** | Verified through the Lambda adapter on the `file` store. |
-| **Polyglot (pg-datahike) path** | Verified end-to-end in the **source prototype** against RIE + MinIO — but with **pg-datahike 0.1.61 and a `DELETE`+`INSERT` workaround**. This repo pins 0.1.63 and `app.py` emits the natural parameterised `INSERT … ON CONFLICT` upsert (fixed upstream, PR #30). **That has not been re-verified in this image.** Do not assume it works. ([issue](https://github.com/replikativ/datahike-serverless/issues)) |
+| **Uberjar build** | `clj -T:build uber` and `clj -T:build uber-pg` both verified in this repo (the pg jar builds; it has not been *run*). |
+| **`d/warm-db` at INIT** | Verified: it runs, reports what it fetched, and removes the GETs from the first invocation — see the table above. |
+| **Example app** | Verified through the Lambda adapter on the `file` store, and as a plain HTTP server via `clj -M:run`. |
+| **Polyglot (pg-datahike) path** | Verified end-to-end in the **source prototype** against RIE + MinIO — but with **pg-datahike 0.1.61 and a `DELETE`+`INSERT` workaround**. This repo pins 0.1.63 and `app.py` emits the natural parameterised `INSERT … ON CONFLICT` upsert (fixed upstream, PR #30). **That has not been re-verified in this image.** Do not assume it works. ([#4](https://github.com/replikativ/datahike-serverless/issues/4)) |
 | **Real AWS** | Never run. No account, no deploy, no SnapStart measurement. |
-| **Terraform / IaC** | **Not built.** Required for a real deployment. |
-| **GC custodian** | **Not built, and required.** See below. |
+| **Terraform / IaC** | **Not built.** Required for a real deployment. ([#1](https://github.com/replikativ/datahike-serverless/issues/1)) |
+| **GC custodian** | **Not built, and required.** See below. ([#2](https://github.com/replikativ/datahike-serverless/issues/2)) |
 
 ### The custodian gap
 

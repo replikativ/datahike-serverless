@@ -153,7 +153,38 @@
   ;;     Do not hand a reader function a read-only IAM policy expecting it to work.
   ;;   - a cold tenant open is 2 PUTs, not 0, in any cost model.
   :connect-puts 2
-  :connect-put-object "<store-id>_.konserve-metadata"}
+  :connect-put-object "<store-id>_.konserve-metadata"
+
+  ;; ── d/warm-db at INIT, same rig, 400-note tenant ────────────────────────
+  ;; Two FRESH reader containers, identical but for DHS_WARM_TENANTS, three
+  ;; invocations each. The warm ran :with-leaves, budget 2000 -> clamped to 1638
+  ;; (0.8x DHS_STORE_CACHE=2048) and fetched 11 nodes in ONE round:
+  ;;   {:fetched 11 :rounds 1 :by-index {:eavt 6 :aevt 5} :budget-clamped? true}
+  :warm-comparison
+  {:tenant-notes 400
+   :no-warm   {:init {:ms 63.3  :gets 0}  :first {:ms 2281.1 :gets 15} :warm {:ms 10.8 :gets 1}
+               :cold-path-ms 2344.4}
+   :init-warm {:init {:ms 539.2 :gets 15} :first {:ms 504.4  :gets 1}  :warm {:ms 7.1  :gets 1}
+               :cold-path-ms 1043.6}
+
+   ;; Here warming at INIT is a clear NET WIN (2344ms -> 1044ms), where the source
+   ;; prototype measured a slight LOSS (3456ms -> 3700ms). Both are real; the
+   ;; difference is instructive and is why "INIT warming is a wash" is stated in the
+   ;; README as a condition rather than a law.
+   ;;
+   ;;   - OVER-FETCH. The prototype's warm fetched 24 GETs where the query needed
+   ;;     18, at +20ms RTT, and paid for the extra six. Here the warm fetched
+   ;;     exactly the 15 the query would have, so there was nothing to lose.
+   ;;   - CLASS LOADING. The warm walks the index at INIT, which loads the
+   ;;     connect/fetch namespaces there. The first invocation is then left with
+   ;;     only the query path to load — 2281ms -> 504ms, on ONE GET. That saving is
+   ;;     not object-store work at all, and it is invisible in a GET count.
+   ;;
+   ;; So the decision rule is: warm at INIT when the warm does not over-fetch
+   ;; relative to the query (tune :depth / :budget), and expect a bigger win than
+   ;; the GET counts suggest because of what else it drags into INIT. On real S3,
+   ;; with real RTT, the over-fetch term grows and this can flip back. Measure it.
+   :caveat "localhost MinIO, laptop, 400-note tenant. RTT is ~0, which is the term the whole design is about."}}
 
  ;; ── The GC gap, quantified ──────────────────────────────────────────────
  ;; Reachable-set vs total objects for one tenant, before and after d/gc-storage.
