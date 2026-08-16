@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# The example app, served from a Lambda instead of a port — locally, against MinIO,
+# with no AWS account.
+#
+# AWS's base image ships the Runtime Interface Emulator, so these containers behave
+# the way they will on Lambda. What this script is really for is the THREE ENTRY
+# POINTS, which cost very different amounts and are usually conflated:
+#
+#   INIT   the container boots (JVM, namespaces, pool, optional warm). Once per
+#          execution environment — and under SnapStart, once per published version.
+#   FIRST  first invocation for a tenant in this container: connection opens cold.
+#   WARM   every invocation after: nothing touches the store but the head re-read.
+#
+#   bin/demo            # build, write, read cold, read warm, print the phases
+#   bin/demo --keep     # leave the stack running afterwards
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+W=http://localhost:9101/2015-03-31/functions/function/invocations
+R=http://localhost:9102/2015-03-31/functions/function/invocations
+KEEP=${1:-}
+
+event() { # method path [body]
+  python3 - "$1" "$2" "${3:-}" <<'PY'
+import json,sys
+m,p,b = sys.argv[1], sys.argv[2], sys.argv[3]
+e = {"version":"2.0","rawPath":p,"rawQueryString":"",
+     "headers":{"content-type":"application/json"},
+     "requestContext":{"http":{"method":m}},
+     "isBase64Encoded":False}
+if b: e["body"] = b
+print(json.dumps(e))
+PY
+}
+
+invoke() { curl -s -XPOST "$1" -H 'content-type: application/json' -d "$(event "$2" "$3" "${4:-}")"; }
+
+echo "==> building (first run compiles an uberjar; a few minutes)"
+docker compose up -d --build
+
+echo "==> waiting for the runtime emulators"
+for _ in $(seq 1 60); do
+  curl -sf -XPOST "$W" -d "$(event GET /health)" >/dev/null 2>&1 && break || sleep 2
+done
+
+echo
+echo "==> WRITE through the writer function (INIT happens on this first call)"
+invoke "$W" POST /t/acme/notes '{"title":"first note","body":"hello from a lambda"}' | head -c 400
+echo; echo
+
+echo "==> READ through the reader function — FIRST (cold tenant in this container)"
+invoke "$R" GET /t/acme/notes | head -c 400
+echo; echo
+
+echo "==> READ again — WARM (same container: connection and node cache held)"
+invoke "$R" GET /t/acme/notes | head -c 400
+echo; echo
+
+echo "==> phases (from the container logs; DHS_LAMBDA_STATS=1)"
+printf '%s\n' "--- writer ---"
+docker compose logs lambda-writer 2>/dev/null | grep -o 'lambda/phase.*' | tail -5 || true
+printf '%s\n' "--- reader ---"
+docker compose logs lambda-reader 2>/dev/null | grep -o 'lambda/phase.*' | tail -5 || true
+
+echo
+echo "INIT is what SnapStart snapshots away, and what DHS_WARM_TENANTS moves work"
+echo "INTO so later invocations pay nothing. Set DHS_WARM_TENANTS=acme on the reader"
+echo "and compare — but read the caveat in the README first: without SnapStart it is"
+echo "a wash."
+
+if [ "$KEEP" != "--keep" ]; then
+  echo; echo "==> tearing down (pass --keep to leave it up)"
+  docker compose down
+fi

@@ -1,0 +1,164 @@
+;; Every number this repo claims, with the conditions it was measured under.
+;;
+;; PROVENANCE. These come from the prototype this repo was extracted from,
+;; https://github.com/replikativ/datahike-saas-starter (doc/results/coldstart.edn),
+;; measured against the AWS Lambda Runtime Interface Emulator + MinIO on a
+;; developer laptop. NOTHING here was measured on real AWS. The stack at
+;; measurement time was datahike 0.8.1735 + a local build of the index-warming
+;; branch that has since been released as 0.8.1779; this repo pins the release.
+;;
+;; They have NOT been re-measured after the port to this repo's smaller example
+;; app (notes instead of an issue tracker). The shape of the app changes the tenant
+;; size and therefore the GET counts; it does not change the structure of the
+;; claims (INIT vs FIRST vs WARM, or what the warm moves where). Re-measure before
+;; quoting the absolute numbers as this repo's own.
+
+{;; ── Clojure-only Lambda: the three entry points ──────────────────────────
+ ;; Tenant: 201 issues. Identical images; the only difference is warm-at-INIT.
+ ;; :gets / :puts are konserve-s3 operation counts, not estimates.
+ :clojure-only
+ {:tenant-issues 201
+  :no-warm   {:init  {:ms 238.3  :gets 0  :puts 0}
+              :first {:ms 3218.1 :gets 18 :puts 2}
+              :warm  {:ms 18.7   :gets 1  :puts 0}}
+  :init-warm {:init  {:ms 3495.1 :gets 24 :puts 2}
+              :first {:ms 204.6  :gets 1  :puts 0}
+              :warm  {:ms 14.8   :gets 1  :puts 0}}
+
+  ;; 1. Warming at INIT moves the work off the request path: first invocation
+  ;;    3218ms/18 GETs -> 205ms/1 GET, 15.7x. The remaining GET is the branch-head
+  ;;    re-read a non-streaming reader pays on every deref, showing up exactly as
+  ;;    priced.
+  ;;
+  ;; 2. WITHOUT SnapStart this is a WASH, slightly negative: 238+3218 = 3456ms
+  ;;    against 3495+205 = 3700ms, because the warm fetches more (24) than the
+  ;;    query needs (18). INIT-warming pays only when INIT is amortised — under
+  ;;    SnapStart (once per PUBLISHED VERSION, not per container) or with many
+  ;;    invocations per container. Do not enable it blind.
+  ;;
+  ;; 3. JVM INIT is 238ms cold, which is good for Clojure and means SnapStart's
+  ;;    value here is mostly the WARM STATE, not the JVM boot.
+  :writes {:steady-state {:puts "1-2" :ms "50-70"}
+           :first-write-per-tenant {:puts 16
+                                    :note "create-database + schema (+ migrations in the source prototype)"}}
+  ;; Fixed in the source prototype and carried over here as pool/:read-only?:
+  ;; a reader performed 2 PUTs on first tenant open (its migrations ran).
+  :fixed-bug "reader performed 2 PUTs on first tenant open"}
+
+ ;; ── Polyglot: Python handler + JVM extension, ONE Lambda env ─────────────
+ ;; Verified end-to-end against RIE + MinIO. An unmodified psycopg handler talking
+ ;; SQL to Datahike over object storage; pg-datahike runs as an EXTERNAL EXTENSION
+ ;; in the same execution environment, so 127.0.0.1:5432 is a JVM, not a Postgres.
+ :polyglot
+ {:extension-init {:pool-ms 51 :open-ms 3070 :warm-ms 0 :load-ms 4190 :total-ms 7311}
+  :handler {:lazy-connect-ms 265
+            :first-read-ms 396.75
+            :warm-read-ms 8.52
+            :write-20-rows-ms 2349.94}   ; ~59ms/statement, DELETE+INSERT workaround
+
+  ;; 1. The connection MUST be lazy. Function init has a hard ~10s budget, and
+  ;;    Extension init runs CONCURRENTLY with Runtime init — Lambda waits for both
+  ;;    to signal Next but does not hold the runtime while an extension boots. A
+  ;;    module-level connect therefore both races the JVM and then blocks init
+  ;;    waiting for it, against a 7.3s extension boot. This killed every earlier
+  ;;    attempt. It is an AWS requirement, not a local artefact.
+  ;;
+  ;; 2. RIE is faithful for this: it enables extensions by default
+  ;;    (rie/run.go SetExtensionsFlag(true)) and runs doInitExtensions before
+  ;;    doRuntimeBootstrap (rapid/handlers.go) — it embeds the same `rapid`
+  ;;    orchestrator Lambda uses. So no entrypoint wrapper is needed, and adding
+  ;;    one is HARMFUL: exporting AWS_LAMBDA_RUNTIME_API makes
+  ;;    /lambda-entrypoint.sh skip RIE entirely. What RIE does NOT do is forward
+  ;;    agent stdout — so probe the socket for readiness, never `docker logs|grep`.
+  ;;
+  ;; 3. The 4190ms term was originally mislabelled "bind". Measured directly,
+  ;;    pg/start-server takes 23ms on a cold JVM and 1ms on repeat calls in the
+  ;;    same process. The 4.2s is `requiring-resolve` loading the pg-datahike
+  ;;    namespace tree — CLASS LOADING, not socket bind.
+  :start-server-ms {:cold 23 :warm 1}
+  :was-mislabelled "bind=4190ms was namespace/class loading, not socket bind"
+
+  ;; Consequence: it is not lazy-able (you need the code to serve SQL) but it is
+  ;; exactly what a heap snapshot removes. SnapStart / native-image / a long-lived
+  ;; container are the levers; restructuring pg-datahike is not.
+  :unverified ["parameterised INSERT ... ON CONFLICT on pg-datahike >= 0.1.62"
+               "the whole polyglot image after the port to this repo"]}
+
+ ;; ── What a short-lived reader pays for one query (no Lambda involved) ────
+ ;; Same store, +20ms injected latency where noted. Context for why warming is
+ ;; about ROUND TRIPS and not about bytes.
+ :cold-read
+ {:latency-ms 0
+  :note "`connect` is 1 GET at every size: with :fuse-index-roots? the index roots ride in the db record."
+  :rows [{:issues 5    :connect-gets 1 :query-gets 0  :total-ms 66.5}
+         {:issues 100  :connect-gets 1 :query-gets 6  :total-ms 115.9}
+         {:issues 400  :connect-gets 1 :query-gets 20 :total-ms 343.7}
+         {:issues 1200 :connect-gets 1 :query-gets 57 :total-ms 450.5}]}
+
+ ;; ── Why d/warm-db is level-parallel BFS and not "preload everything" ─────
+ ;; Both reach the same end state (query at 0 GETs). One costs 27x the other.
+ :warm-vs-preload
+ {:latency-ms 20 :issues 400
+  :preload {:connect-ms 11836.4 :connect-gets 392
+            :how "tiered-store populate-missing: -keys enumeration (1 GET/object) then fetch each key again"}
+  :warm    {:warm-ms 246.3 :warm-gets 37
+            :how "walk from the root, each level fetched in one wave; touches only REACHABLE nodes"}
+  ;; A partial warm gives a partial saving and lands between naive and fully warmed
+  ;; — no cliff, no mode change. (400 issues, budget 8: query 21 -> 12 GETs.)
+  :no-discontinuity? true}
+
+ ;; ── Measured in THIS repo, 2026-08-16 ────────────────────────────────────
+ ;; RIE + MinIO on localhost (no injected latency), this repo's notes example, a
+ ;; ONE-NOTE tenant, GraalVM JDK 25 host / temurin-21 in the image. Reproduce with
+ ;; `cd platforms/aws-lambda && ./bin/demo --keep`; the phases come from the
+ ;; containers' own DHS_LAMBDA_STATS output.
+ ;;
+ ;; These are a WORKING-END-TO-END check, not a benchmark: one note is far too
+ ;; small a tenant to say anything about index reads, and localhost MinIO has none
+ ;; of the round-trip cost the whole design is about. Two things in them are
+ ;; nonetheless informative, and both were surprises.
+ :this-repo
+ {:writer {:init      {:ms 84.9  :gets 0 :puts 0}
+           :first-write {:ms 3568.6 :gets 6 :puts 12}   ; create-database + schema + commit
+           :cold-open-existing-tenant {:ms 2080.4 :gets 3 :puts 2}}
+  :reader {:init      {:ms 40.2   :gets 0 :puts 0}
+           :first     {:ms 2774.5 :gets 4 :puts 2}
+           :warm      {:ms 13.1   :gets 1 :puts 0}
+           :second-cold-tenant-same-container {:ms 78.8 :gets 3 :puts 2}}
+
+  ;; SURPRISE 1 — most of "first invocation" is CLASS LOADING, not object reads.
+  ;; The reader's first invocation took 2774ms for 4 GETs. Opening a SECOND cold
+  ;; tenant in the same warm container took 78.8ms for 3 GETs. One GET's difference,
+  ;; 35x the time. On a near-zero-latency store with a one-note tenant there are
+  ;; almost no nodes to fetch, so what the first invocation is paying for is
+  ;; datahike's connect/query namespaces being loaded and compiled — the same term
+  ;; that shows up as 4190ms in the pg-datahike extension.
+  ;;
+  ;; This does not contradict the prototype's 3218ms/18 GETs: that tenant was 201
+  ;; issues behind +0ms MinIO, so it paid BOTH. It does mean the split between
+  ;; "class loading" and "round trips" in any cold-start number has to be measured,
+  ;; not assumed — and that SnapStart (which removes the first term) and warming
+  ;; (which removes the second) are not substitutes for each other.
+
+  ;; SURPRISE 2 — `connect` COSTS 2 PUTs, for every role, on every cold open.
+  ;; Observed for both the reader and the writer, connecting to a tenant database
+  ;; that already exists, with no schema change and no transaction: 2 PUTs, and the
+  ;; only object whose timestamp moves is `<store-id>_.konserve-metadata`, the
+  ;; per-store marker konserve's store-connect path (re)writes. It is NOT the branch
+  ;; head, and NOT datahike schema or migrations — the source prototype attributed
+  ;; its reader's 2 PUTs to migrations and removed those, and the 2 PUTs remain.
+  ;;
+  ;; Two consequences, both practical:
+  ;;   - a reader with READ-ONLY object-store credentials FAILS TO CONNECT today.
+  ;;     Do not hand a reader function a read-only IAM policy expecting it to work.
+  ;;   - a cold tenant open is 2 PUTs, not 0, in any cost model.
+  :connect-puts 2
+  :connect-put-object "<store-id>_.konserve-metadata"}
+
+ ;; ── The GC gap, quantified ──────────────────────────────────────────────
+ ;; Reachable-set vs total objects for one tenant, before and after d/gc-storage.
+ ;; A serverless deployment has nowhere to run GC (it must run in a writer JVM),
+ ;; which is why the custodian is filed as REQUIRED and not as a nicety.
+ :garbage
+ {:issues 400 :objects-before-gc 197 :objects-after-gc 40 :garbage-pct 80.0
+  :field-observation "a third-party production bucket was measured at 16x its live state with no custodian"}}

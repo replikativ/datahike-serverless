@@ -1,0 +1,88 @@
+# AWS Lambda, locally: RIE + MinIO. No AWS account, no credentials.
+#
+#   cd platforms/aws-lambda
+#   docker compose up -d --build          # minio + writer + reader
+#   ./bin/demo                            # drive the three phases
+#   docker compose --profile pg up -d --build   # the polyglot image (less verified)
+#
+# The split is what datahike's model requires: readers are unconstrained, the writer
+# is SINGLE. On real AWS the writer needs reserved_concurrent_executions = 1 until
+# the branch head is CAS-fenced (datahike #878) — and even then that narrows the
+# window rather than closing it.
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: dhs-minio
+    ports: ["9000:9000", "9099:9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes: ["minio-data:/data"]
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/tenants &&
+      echo 'bucket tenants ready'"
+
+  lambda-writer:
+    build:
+      context: ../..
+      dockerfile: platforms/aws-lambda/Dockerfile
+    environment: &env
+      DHS_STORE: s3
+      S3_BUCKET: tenants
+      S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      DHS_STORE_CACHE: "2048"
+      DHS_LAMBDA_STATS: "1"      # per-phase GET/PUT counts (demo only: not reentrant)
+    ports: ["9101:8080"]
+    depends_on:
+      minio: {condition: service_healthy}
+
+  lambda-reader:
+    build:
+      context: ../..
+      dockerfile: platforms/aws-lambda/Dockerfile
+    environment:
+      <<: *env
+      DHS_ROLE: reader           # non-streaming writer backend => @conn re-reads the head
+      DHS_WRITER_URL: "http://lambda-writer:8080"
+      # Prime these tenants during INIT. Empty by default ON PURPOSE — without
+      # SnapStart this is a wash or slightly negative (see the README). Set it to
+      # `acme` to reproduce the 3218ms -> 205ms first-invocation measurement.
+      DHS_WARM_TENANTS: ""
+      DHS_WARM_DEPTH: "with-leaves"
+      DHS_WARM_BUDGET: "2000"
+    ports: ["9102:8080"]
+    depends_on:
+      minio: {condition: service_healthy}
+
+  # ── polyglot: Python handler + JVM extension in one execution environment ──
+  lambda-pg:
+    profiles: ["pg"]
+    build:
+      context: ../..
+      dockerfile: platforms/aws-lambda/Dockerfile.pg
+    environment:
+      <<: *env
+      DHS_PG_TENANTS: acme
+      PG_DSN: "postgresql://alice@127.0.0.1:5432/acme"
+    ports: ["9103:8080"]
+    depends_on:
+      minio: {condition: service_healthy}
+
+volumes:
+  minio-data:

@@ -1,0 +1,38 @@
+# The POLYGLOT shape: a Python handler and a JVM extension in ONE Lambda execution
+# environment, sharing a network namespace — so the handler's psycopg reaches
+# pg-datahike on 127.0.0.1:5432 and never knows it is talking to Datahike over
+# object storage.
+#
+# Lambda scans /opt/extensions and runs whatever it finds there as an EXTERNAL
+# extension: a separate process, started before the runtime, that outlives each
+# invocation. RIE (in the base image) proxies the Extensions API as well as the
+# Runtime API, so this is testable locally with no AWS account.
+#
+# ⚠️ LESS VERIFIED than the Clojure-only image. See the README: the last measured
+# run used pg-datahike 0.1.61 with a DELETE+INSERT workaround; the natural
+# parameterised `ON CONFLICT` upsert that app.py now emits (fixed upstream in
+# 0.1.62) has NOT been re-verified in this image.
+#
+# Build from the REPO ROOT:
+#   docker build -f platforms/aws-lambda/Dockerfile.pg -t datahike-serverless-pg .
+FROM clojure:temurin-21-tools-deps AS build
+WORKDIR /app
+COPY deps.edn build.clj ./
+RUN clojure -P -T:build uber-pg || true
+COPY . .
+RUN clojure -T:build uber-pg
+
+FROM public.ecr.aws/lambda/python:3.12
+# A JRE for the extension. jlink-trimming this is the obvious size lever, but the
+# measurements say image size is NOT the dominant cold-start term — class loading
+# and tenant open are — so it is deliberately left for later.
+RUN dnf install -y java-21-amazon-corretto-headless && dnf clean all
+RUN pip install --no-cache-dir "psycopg[binary]" --target "${LAMBDA_TASK_ROOT}"
+
+COPY --from=build /app/target/datahike-serverless-pg.jar /opt/java/app.jar
+COPY platforms/aws-lambda/extension/pg-datahike /opt/extensions/pg-datahike
+RUN chmod +x /opt/extensions/pg-datahike
+COPY platforms/aws-lambda/extension/app.py ${LAMBDA_TASK_ROOT}/app.py
+
+ENV DHS_PG_TENANTS=acme DHS_PG_PORT=5432
+CMD [ "app.handler" ]

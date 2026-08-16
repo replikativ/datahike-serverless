@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Lambda external extension: supervise pg-datahike on loopback.
+
+Registers for SHUTDOWN only, deliberately. Registering for INVOKE would put this
+process in the invoke phase -- "the duration is the total time it takes for your
+runtime and all your extensions' invocations to complete" -- for no benefit, since
+the handler reaches the server over a socket rather than through Lambda's event
+bus. It is also the ONLY shape that works on Lambda Managed Instances, where
+extensions cannot register for INVOKE at all.
+
+The JVM is booted and the port confirmed listening BEFORE the first `next` call,
+so Extension init does not complete until the server is reachable. That removes the
+race with the handler, and is why the JVM boot is honestly part of the cold start
+rather than hidden behind it.
+
+The file name must match the Lambda-Extension-Name header exactly.
+
+NOTE on local testing: none of this needs emulation scaffolding. RIE embeds the
+same `rapid` orchestrator Lambda uses -- it enables extensions by default
+(rie/run.go SetExtensionsFlag(true)) and runs doInitExtensions before
+doRuntimeBootstrap (rapid/handlers.go). An earlier version of this shipped a
+local-entrypoint.sh to "start extensions RIE would not start"; that was wrong, and
+worse, it exported AWS_LAMBDA_RUNTIME_API, which makes /lambda-entrypoint.sh skip
+RIE entirely because it assumes it is already on Lambda.
+
+The one thing that IS invisible locally: RIE does not forward agent stdout to the
+container log. Probe the socket to decide readiness, never `docker logs | grep`.
+"""
+import os, socket, subprocess, sys, time, urllib.request
+
+NAME = "pg-datahike"
+API  = os.environ.get("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
+BASE = f"http://{API}/2020-01-01/extension"
+PORT = int(os.environ.get("DHS_PG_PORT", "5432"))
+
+def log(m): print(f"[ext:{NAME}] {m}", flush=True)
+
+def register():
+    # Retried, because on AWS the Runtime API is up before extensions start, but
+    # locally the emulator and the extensions race. Harmless there, required here.
+    deadline = time.time() + 60
+    while True:
+        try:
+            req = urllib.request.Request(
+                f"{BASE}/register", method="POST", data=b'{"events":["SHUTDOWN"]}',
+                headers={"Lambda-Extension-Name": NAME, "Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as r:
+                return r.headers["Lambda-Extension-Identifier"]
+        except OSError:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.2)
+
+def boot_jvm():
+    t0 = time.time()
+    p = subprocess.Popen(["java", "-cp", "/opt/java/app.jar", "clojure.main",
+                          "-m", "datahike-serverless.platform.aws-lambda.pg-extension"],
+                         stdout=sys.stdout, stderr=sys.stderr)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if p.poll() is not None:
+            log(f"JVM exited early rc={p.returncode}"); sys.exit(1)
+        try:
+            with socket.create_connection(("127.0.0.1", PORT), timeout=0.5):
+                log(f"EXT-INIT-READY {(time.time()-t0)*1000:.0f}ms")
+                return p
+        except OSError:
+            time.sleep(0.1)
+    log("timed out waiting for pg-datahike"); sys.exit(1)
+
+def main():
+    ident = register(); log(f"registered id={ident[:8]}")
+    proc = boot_jvm()
+    while True:
+        req = urllib.request.Request(f"{BASE}/event/next",
+                                     headers={"Lambda-Extension-Identifier": ident})
+        with urllib.request.urlopen(req) as r:      # blocking by design; no timeout
+            body = r.read().decode()
+        if '"SHUTDOWN"' in body:
+            log("shutdown; stopping pg-datahike")
+            proc.terminate()
+            try: proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired: proc.kill()
+            return
+
+if __name__ == "__main__":
+    main()

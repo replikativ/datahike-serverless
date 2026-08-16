@@ -1,0 +1,61 @@
+{:paths ["src" "resources"]
+
+ :deps
+ {org.clojure/clojure {:mvn/version "1.12.4"}
+
+  ;; Pinned, released coordinates. `datahike 0.8.1779` is the first release that
+  ;; carries the index-warming API this repo's INIT path uses:
+  ;;   d/warm-index   one index, breadth-first, budget-bounded
+  ;;   d/warm-datoms  the subtree a components-scoped scan will read
+  ;;   d/warm-db      every present index, one budget shared round-robin  <- used here
+  ;; konserve arrives transitively (0.9.372 at this datahike version); do not pin it
+  ;; at the top level unless you have a reason, a top-level pin wins over datahike's.
+  org.replikativ/datahike    {:mvn/version "0.8.1779"}
+  org.replikativ/konserve-s3 {:mvn/version "0.1.37"}
+
+  ;; Config as data — one aero file, two store profiles (resources/config.edn).
+  aero/aero {:mvn/version "1.1.6"}
+
+  ;; HTTP surface, kept small. The Lambda platform adapter reuses the SAME ring
+  ;; handler; only the transport differs.
+  metosin/reitit-ring       {:mvn/version "0.7.2"}
+  metosin/reitit-middleware {:mvn/version "0.7.2"}
+  metosin/muuntaja          {:mvn/version "0.6.10"}
+  ring/ring-jetty-adapter   {:mvn/version "1.13.0"}
+
+  org.replikativ/logging {:mvn/version "0.1.3"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev"]
+        :extra-deps  {nrepl/nrepl {:mvn/version "1.3.0"}}
+        :main-opts   ["-m" "nrepl.cmdline" "--port" "7888"]}
+
+  ;; Run the example app as an ordinary HTTP server (the Cloud Run / Fly shape).
+  :run {:main-opts ["-m" "datahike-serverless.app"]}
+
+  ;; ── platform: AWS Lambda ─────────────────────────────────────────────────
+  ;; Adding a platform is adding a directory + an alias here, not a repo.
+  ;; Only the AWS runtime interface is extra — jsonista arrives via muuntaja.
+  :aws-lambda
+  {:extra-paths ["platforms/aws-lambda/src"]
+   :extra-deps  {com.amazonaws/aws-lambda-java-core {:mvn/version "1.2.3"}}}
+
+  ;; Uberjar. AOT is REQUIRED, not an optimisation: the Lambda java runtime loads a
+  ;; handler CLASS by name, and the adapter only becomes one via :gen-class.
+  :build
+  {:extra-paths ["platforms/aws-lambda/src"]
+   :extra-deps  {io.github.clojure/tools.build          {:mvn/version "0.10.5"}
+                 com.amazonaws/aws-lambda-java-core     {:mvn/version "1.2.3"}}
+   :ns-default  build}
+
+  ;; pg-datahike: the tenant pool exposed as a PostgreSQL server, for the polyglot
+  ;; Lambda shape (Python handler + JVM extension). 0.1.62 is the first release with
+  ;; the parameterised `INSERT ... ON CONFLICT` fix (upstream PR #30); see the README
+  ;; for what is and is not verified with it.
+  :pg {:extra-deps {org.replikativ/pg-datahike {:mvn/version "0.1.63"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps  {io.github.cognitect-labs/test-runner
+                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts   ["-m" "cognitect.test-runner"]
+         :exec-fn     cognitect.test-runner.api/test}}}

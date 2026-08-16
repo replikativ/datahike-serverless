@@ -1,0 +1,56 @@
+;; datahike-serverless — one config, two store profiles.
+;;
+;; Select with DHS_STORE (file | s3). `file` is the default so the repo runs with
+;; no Docker, no cloud account and no credentials; `s3` is the one that exercises
+;; the object-store path the measurements are about.
+
+{;; ── Shared Datahike settings ───────────────────────────────────────────────
+ ;; Write-amplification knobs. Each PUT is the dominant cost and latency on an
+ ;; object store, so these are what make per-tenant object storage economical.
+ ;;   :fuse-index-roots?  inline each index root into the db record — saves one PUT
+ ;;                       per index touched per commit, and one GET per index on a
+ ;;                       cold open. It is also why `connect` is 1 GET at any size:
+ ;;                       for a small tenant the fused record IS the database.
+ ;;   :commit-graph? false  drop the per-commit provenance object (-1 PUT/commit).
+ ;;                         Time travel is unaffected (it lives in the temporal
+ ;;                         indices); branching is given up.
+ ;;   :diff-buf-size      buffer content-only child diffs into the ancestor. Cuts
+ ;;                       stored-object GROWTH, not the PUT floor. Create-time-fixed.
+ :keep-history?     false
+ :fuse-index-roots? true
+ :commit-graph?     false
+ :index-config      {:diff-buf-size 256}
+
+ ;; ENTRY-counted node cache. `d/warm-db` clamps its budget to 0.8x this, because
+ ;; warming past the cache fetches nodes only to evict them. On a function with a
+ ;; small memory setting this is the knob that bounds how much warmth you can hold.
+ :store-cache-size  #long #or [#env DHS_STORE_CACHE "2048"]
+
+ ;; The DEFAULT writer: this process has write authority and reads its own
+ ;; in-memory db. A READER must not use this — `:self` is a *streaming* writer, so
+ ;; `@conn` returns the in-memory atom instead of re-reading the branch head, and
+ ;; the process would serve a frozen snapshot forever. `DHS_ROLE=reader` swaps in a
+ ;; non-streaming writer backend for exactly that reason (see config.clj).
+ :writer            {:backend :self
+                     :transaction-queue-size 256
+                     :commit-queue-size      256}
+
+ ;; ── The store — the only thing that changes ────────────────────────────────
+ :store
+ #profile
+ {;; A plain directory on disk. One folder per tenant. Zero configuration.
+  :file
+  {:backend :file
+   :path    #or [#env DHS_DATA_DIR "data/tenants"]}
+
+  ;; Any S3-compatible object store: AWS S3, MinIO, Tigris, Hetzner, R2.
+  ;; Leave S3_ENDPOINT unset for plain AWS and the endpoint override is dropped,
+  ;; so the standard AWS credential chain and endpoint apply.
+  :s3
+  {:backend            :s3
+   :region             #or [#env AWS_REGION "us-east-1"]
+   :bucket             #or [#env S3_BUCKET "tenants"]
+   :path-style-access? #boolean #or [#env S3_PATH_STYLE "true"]
+   :access-key         #or [#env AWS_ACCESS_KEY_ID nil]
+   :secret             #or [#env AWS_SECRET_ACCESS_KEY nil]
+   :s3-endpoint        #or [#env S3_ENDPOINT nil]}}}

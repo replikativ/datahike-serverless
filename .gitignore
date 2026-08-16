@@ -1,0 +1,16 @@
+/.cpcache/
+/.clj-kondo/.cache/
+/.lsp/.cache/
+/target/
+/classes/
+*.jar
+.nrepl-port
+.rebel_readline_history
+
+# local file-backend tenant data
+/data/
+
+*.hprof
+hs_err_pid*.log
+replay_pid*.log
+core.*
