@@ -10,20 +10,26 @@
    The role is not cosmetic and not a permission check — it changes the datahike
    CONFIG in a way that decides whether the process can see new data at all:
 
-     writer  `:writer {:backend :self}` — streaming, so `@conn` returns the
-             in-memory atom. Correct for the process that owns the branch head.
-     reader  `:writer {:backend :datahike-server}` — NON-streaming, so every
-             `@conn` re-reads the branch head from the store and the reader
-             follows the writer with no connection to it.
+     writer  `:writer {:backend :self ...}` — transacts here, FENCED: since
+             datahike 0.8.1792 a self writer defaults to shared ownership, so it
+             re-reads the branch head before each batch and publishes it with a
+             conditional PUT. The config demands that with `:require-fencing`
+             (see resources/config.edn), so a store that cannot fence refuses
+             the connect instead of running unprotected.
+     reader  `:writer {:backend :datahike-server}` — a REMOTE writer, so this
+             connection is not streamed to and every `@conn` re-reads the
+             branch head from the store; the reader follows the writer with no
+             connection to it.
 
-   A reader left on the default `:self` writer serves a FROZEN snapshot forever,
-   silently, while also claiming write authority over a bucket someone else owns.
-   That is the mistake this namespace exists to make impossible to fall into.
+   A reader left on the default `:self` writer would claim write authority over
+   a bucket someone else owns — fenced now, so it can no longer silently clobber
+   the real writer, but it would still create databases and install schema. That
+   is the mistake this namespace exists to make impossible to fall into.
 
    The `:datahike-server` writer is NOT a working write path here — it POSTs to
    datahike's own HTTP-server routes, which this app does not mount. It is
-   configured for its `:streaming? false` answer alone; `pool/create` additionally
-   refuses to create databases or install schema on a reader."
+   configured because a remote writer backend is exactly \"do not transact\n   here, refresh on deref\"; `pool/create` additionally refuses to create databases or
+   install schema on a reader."
   (:require [aero.core :as aero]
             [clojure.java.io :as io]
             [clojure.string :as str]))

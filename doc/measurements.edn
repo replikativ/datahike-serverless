@@ -186,6 +186,23 @@
    ;; with real RTT, the over-fetch term grows and this can flip back. Measure it.
    :caveat "localhost MinIO, laptop, 400-note tenant. RTT is ~0, which is the term the whole design is about."}}
 
+ ;; ── Fencing (datahike 0.8.1792) ─────────────────────────────────────────
+ ;; The deploy-overlap scenario, run for real: two writer JVMs on ONE tenant over
+ ;; MinIO, 30 transacts each, interleaving freely. The branch head is published
+ ;; with a conditional PUT (shared writer ownership, konserve-s3 If-Match), and
+ ;; the writer config DEMANDS the reach (:require-fencing :global) so connect
+ ;; refuses a store that cannot fence rather than running unprotected.
+ :fencing
+ {:datahike "0.8.1792" :konserve-s3 "0.1.38"
+  :two-writer-race {:writers 2 :transacts-per-writer 30
+                    :reported-ok 60 :present-after 60 :lost 0}
+  ;; Warm steady-state commit with the fence active. Inside the unfenced 50-70ms
+  ;; band measured on 0.8.1779: the head re-read costs one GET per commit batch,
+  ;; which at localhost RTT is invisible. On real S3 budget ~+1 GET (~20ms) per
+  ;; batch; queued transactions share one head read.
+  :warm-fenced-commit-ms {:s3-minio 66.1 :file 34.4}
+  :caveat "localhost MinIO, laptop. On 0.8.1779 the same two-writer run lost commits (datahike#878)."}
+
  ;; ── The GC gap, quantified ──────────────────────────────────────────────
  ;; Reachable-set vs total objects for one tenant, before and after d/gc-storage.
  ;; A serverless deployment has nowhere to run GC (it must run in a writer JVM),

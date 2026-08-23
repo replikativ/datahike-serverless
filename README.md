@@ -16,9 +16,12 @@ this repo will not claim it until it is.
 
 Adding a platform is adding a directory under `platforms/`, not a repo.
 
-> ⚠️ **Experimental.** Reads are safe and unconstrained. Writes are single-writer
-> and not yet fenced — see [Two requirements](#two-requirements-not-two-tips).
-> Nothing here has been run on real AWS.
+> ⚠️ **Experimental.** Reads are safe and unconstrained. Writes are **fenced**
+> since datahike `0.8.1792`: the branch head is published with a conditional PUT,
+> so overlapping writer environments reject instead of overwrite — measured, two
+> JVMs, 60/60 commits survive. See
+> [Two requirements](#two-requirements-not-two-tips). Nothing here has been run
+> on real AWS.
 
 ---
 
@@ -116,8 +119,14 @@ watch whether the warm fetches more than the query does*.
 
 | | PUTs | time |
 |---|--:|--:|
-| steady-state commit | 1–2 | 50–70 ms |
+| steady-state commit (unfenced, datahike 0.8.1779) | 1–2 | 50–70 ms |
+| steady-state commit (**fenced**, datahike 0.8.1792) | 1–2 | **66 ms** |
 | a tenant's **first** write | ~16 | — |
+
+The fence costs one branch-head GET per commit batch (the shared writer re-reads
+before applying) plus the conditional PUT, and at localhost RTT that is invisible —
+66 ms sits inside the old unfenced band. On real S3 budget ~+1 GET (≈20 ms) per
+batch; transactions that queue while one commits share a single head read.
 
 The first write is `create-database` + schema install (+ migrations, in the source
 prototype). It is not steady state, and it is worth pre-creating tenants if first-
@@ -170,21 +179,38 @@ invoke moves the wait into the invoke phase, whose timeout is the function's
 This is an AWS requirement, not a local artefact. See
 [`platforms/aws-lambda/extension/app.py`](platforms/aws-lambda/extension/app.py).
 
-### 2. Writes are single-writer until datahike #878
+### 2. Writes are fenced — demand it, don't assume it
 
 Datahike readers are unconstrained: any number, in any number of processes, on the
-same bucket, with no coordination. **Writers are not.** Two live writers on one
-tenant can lose a commit, because the branch head is written unconditionally.
+same bucket, with no coordination. Writers used to be the caveat: two live writers
+on one tenant could lose a commit, because the branch head was written
+unconditionally. That was
+[datahike#878](https://github.com/replikativ/datahike/issues/878), and it is
+closed: since `0.8.1792` a `:self` writer defaults to shared ownership — it
+re-reads the branch head before each batch and publishes it with a **conditional
+PUT** (`If-Match` on S3, evaluated by the store). The loser of a head race is
+rejected and its transaction re-applied against the head that moved, bounded by
+`:head-conflict-retries` (default 3). Nothing is lost and nothing partially
+applied: everything a commit writes before the head flip is immutable and
+content-addressed, so a rejected commit leaves collectable orphans, never a
+dangling pointer.
 
-The fix is a compare-and-swap on the head via a conditional PUT —
-[datahike#878](https://github.com/replikativ/datahike/issues/878). `konserve-s3`
-already implements `put-object-conditional`; datahike does not yet use it for the
-head.
+Measured here, the deploy-overlap scenario itself: two writer JVMs interleaving 30
+transacts each on **one tenant** over MinIO — all 60 report success, all 60
+present afterwards. On `0.8.1779` this exact run lost commits.
 
-Until then: run the writer function at **reserved concurrency 1**. Say plainly what
-that does and does not do — it **narrows** the window for two live writers, it does
-**not close** it, because deploys and container replacement still overlap two
-environments. Treat writes as demo-grade until #878 lands.
+Two disciplines remain, and they are cheap:
+
+- **Demand the fence.** Datahike fences where the store can compare-and-set and
+  *skips silently* where it cannot. This repo's writer config therefore sets
+  `:require-fencing` (`:global` on the s3 profile, `:machine` on file — see
+  `resources/config.edn`), which makes `connect` refuse a store that cannot fence
+  that far instead of running unprotected.
+- **Reserved concurrency 1 is now a cost knob, not a correctness one.** A lost
+  head race is a wasted apply plus a jittered backoff, so keeping writers
+  serialized is still the way to be fast. It is no longer what safety rests on:
+  deploys and container replacement overlapping two environments is exactly the
+  window the fence closes.
 
 Readers are safe today, at any concurrency, and the reader/writer split is enforced
 in code: a reader refuses to create databases or install schema (`pool.clj`), and

@@ -3,15 +3,20 @@
  :deps
  {org.clojure/clojure {:mvn/version "1.12.4"}
 
-  ;; Pinned, released coordinates. `datahike 0.8.1779` is the first release that
-  ;; carries the index-warming API this repo's INIT path uses:
+  ;; Pinned, released coordinates. `datahike 0.8.1792` is the first release that
+  ;; FENCES the branch head (datahike#878 via #977): a `:self` writer defaults to
+  ;; `:writer-ownership :shared`, re-reads the head per batch and publishes it with
+  ;; a conditional PUT, so two live writer environments can no longer silently
+  ;; overwrite each other — the property this repo's writer role needs on Lambda,
+  ;; where deploys and container replacement always overlap two environments.
+  ;; `0.8.1779` was the first with the index-warming API the INIT path uses:
   ;;   d/warm-index   one index, breadth-first, budget-bounded
   ;;   d/warm-datoms  the subtree a components-scoped scan will read
   ;;   d/warm-db      every present index, one budget shared round-robin  <- used here
-  ;; konserve arrives transitively (0.9.372 at this datahike version); do not pin it
+  ;; konserve arrives transitively (0.9.378 at this datahike version); do not pin it
   ;; at the top level unless you have a reason, a top-level pin wins over datahike's.
-  org.replikativ/datahike    {:mvn/version "0.8.1779"}
-  org.replikativ/konserve-s3 {:mvn/version "0.1.37"}
+  org.replikativ/datahike    {:mvn/version "0.8.1792"}
+  org.replikativ/konserve-s3 {:mvn/version "0.1.38"}
 
   ;; Config as data — one aero file, two store profiles (resources/config.edn).
   aero/aero {:mvn/version "1.1.6"}

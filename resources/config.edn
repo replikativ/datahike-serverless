@@ -26,14 +26,30 @@
  ;; small memory setting this is the knob that bounds how much warmth you can hold.
  :store-cache-size  #long #or [#env DHS_STORE_CACHE "2048"]
 
- ;; The DEFAULT writer: this process has write authority and reads its own
- ;; in-memory db. A READER must not use this — `:self` is a *streaming* writer, so
- ;; `@conn` returns the in-memory atom instead of re-reading the branch head, and
- ;; the process would serve a frozen snapshot forever. `DHS_ROLE=reader` swaps in a
- ;; non-streaming writer backend for exactly that reason (see config.clj).
+ ;; The DEFAULT writer: this process has write authority. A READER must not use
+ ;; this — a `:self` writer streams its own commits into the connection, and a
+ ;; reader has no writer to follow that way; `DHS_ROLE=reader` swaps in a remote
+ ;; writer backend so `@conn` re-reads the branch head instead (see config.clj).
+ ;;
+ ;; `:require-fencing` is a DEMAND, not a hint: connect refuses to proceed on a
+ ;; store that cannot compare-and-set the branch head as far as the profile
+ ;; needs — `:global` on S3 (any host can run a writer), `:machine` on the file
+ ;; profile (processes on this host). Without it datahike still fences wherever
+ ;; the store can, but SKIPS SILENTLY where it cannot — and a Lambda deployment
+ ;; that believes it is fenced while it is not is exactly the lost update
+ ;; datahike#878 was about. Two environments can overlap on every deploy, so
+ ;; make the guarantee checked, not assumed.
+ ;;
+ ;; The fence is why writer concurrency no longer corrupts: the loser of a head
+ ;; race is REJECTED and its transaction re-applied against the head that moved
+ ;; (bounded by :head-conflict-retries, default 3). Reserved concurrency 1 is
+ ;; still worth setting for COST — a lost race is a wasted apply plus a backoff —
+ ;; but it is no longer what correctness rests on.
  :writer            {:backend :self
                      :transaction-queue-size 256
-                     :commit-queue-size      256}
+                     :commit-queue-size      256
+                     :require-fencing        #profile {:file :machine
+                                                       :s3   :global}}
 
  ;; ── The store — the only thing that changes ────────────────────────────────
  :store
