@@ -99,6 +99,40 @@ tiered-LMDB is the portable spelling of the same idea. Not yet wired here.
   snapshot is a local, always-valid cache of the entire read set at publish
   time.
 
+## Run it yourself
+
+Nothing here needs AWS. The rig is a CRaC JDK, criu (a package on most
+distros), MinIO for the store, and toxiproxy for object-store-shaped latency:
+
+```bash
+# 1. a CRaC-enabled JDK (Zulu builds ship one)
+curl -sLO https://cdn.azul.com/zulu/bin/zulu21.52.17-ca-crac-jdk21.0.12-linux_x64.tar.gz
+tar xzf zulu21.52.17-ca-crac-jdk21.0.12-linux_x64.tar.gz
+JAVA=$PWD/zulu21.52.17-ca-crac-jdk21.0.12-linux_x64/bin/java
+
+# 2. latency-shaped store: MinIO behind toxiproxy at +20ms
+docker run -d --name minio --network host -e MINIO_ROOT_USER=minioadmin   -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
+docker run -d --name toxiproxy --network host ghcr.io/shopify/toxiproxy
+docker exec toxiproxy /toxiproxy-cli create -l 0.0.0.0:19000 -u localhost:9000 minio
+docker exec toxiproxy /toxiproxy-cli toxic add -t latency -a latency=20 minio
+
+# 3. checkpoint: INIT + data warm + code warm, then snapshot before the socket binds
+export DHS_STORE=s3 S3_ENDPOINT=http://localhost:19000 S3_BUCKET=tenants        AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1        DHS_ROLE=reader DHS_WARM_TENANTS=acme DHS_WARM_BUDGET=6000 DHS_STORE_CACHE=16384        CRAC_CHECKPOINT=1 CRAC_SETTLE_MS=75000   # settle > the SDK's 60s idle reap
+CP="$(clojure -Spath):dev"
+$JAVA -XX:CRaCCheckpointTo=/tmp/crac-img -cp "$CP" clojure.main -m crac-harness
+# the process exits into the image when the checkpoint completes
+
+# 4. restore — no classpath, no flags but the image; resumes after the
+#    checkpoint call: delta re-warm, then bind and serve
+$JAVA -XX:CRaCRestoreFrom=/tmp/crac-img
+```
+
+The harness prints `CRAC-MARK <phase> <epoch-ms>` lines around every phase
+(`:warmed`, `:code-warmed`, `:restored`, `:rewarmed`, `:listening`), which is
+how every number in this document was taken. On AWS the same shape is Lambda
+SnapStart with `beforeCheckpoint`/`afterRestore` CRaC hooks — zip-packaged
+managed runtime; SnapStart does not take container images.
+
 ## Open follow-ups
 
 - Real AWS SnapStart run (zip-packaged managed runtime — SnapStart does not

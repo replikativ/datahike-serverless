@@ -232,6 +232,31 @@ two practical consequences:
 
 ---
 
+## Cold starts: SnapStart / CRaC, measured
+
+The biggest result in this repo: checkpoint the app after INIT — data warm AND
+one request through the real handler — and restore it the way Lambda SnapStart
+does. Measured on a 50k-note tenant over object storage at +20 ms, with the
+image **1000 notes stale**:
+
+| | first *correct* response |
+|---|--:|
+| cold JVM, no AOT | ~47 s |
+| cold AOT container | ~2.3–3.5 s |
+| snapshot restore, fresh image | **67–95 ms** |
+| snapshot restore, 1000 notes stale | **0.94–1.12 s** |
+
+Three findings carry it: a snapshot's node cache **never goes stale**
+(immutable, content-addressed — staleness costs the delta, not the database);
+the **class graph is part of the image** (a checkpoint that never ran a query
+ships a ~5 s first-request tail no data warm can touch); and the delta re-warm
+belongs **on restore, at `:with-leaves`**. The residual design rule: a cold
+start is as fast as the first request is small — which is why the example's
+list route is paginated.
+
+Full numbers, the runbook to reproduce them locally (no AWS needed), and the
+open follow-ups: [doc/snapstart-crac.md](doc/snapstart-crac.md).
+
 ## Try it
 
 Nothing installed but a JVM and the Clojure CLI:
