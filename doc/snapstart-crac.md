@@ -41,6 +41,40 @@ code path per PUBLISH; warm the data delta per RESTORE.
 +20 ms) instead of the first query discovering it serially (~248 round trips,
 ~5 s). `:interior` is not enough here — the leaves are what the query reads.
 
+## Scale: 50k notes (~200k datoms, 1520 store objects)
+
+Re-run against a tenant 50x larger (cache 16384 entries, warm budget 6000 —
+the tree is 1174 nodes):
+
+| | |
+|---|--:|
+| warm, cold cache (1174 nodes, width 64) | 2810 ms |
+| **warm again, same 1174 restores** | **120 ms** |
+| full 50k query, hot | 1124 ms |
+| CRaC fresh restore → first response (6.2 MB JSON) | 2.4–3.8 s |
+| CRaC stale (+1000 notes) → first response | 3.9–4.3 s (rewarm 1157 ms, listen +1.1 s) |
+
+The double-warm row is the answer to "does warming respect what the image
+already holds": the second warm issues the **identical 1174 restores in 120 ms
+with zero network** — every one a cache hit. `:fetched` counts restores
+issued, hits included; only misses touch S3. Two boundaries to that guarantee:
+the cache is ENTRY-counted (size it to the tree, here 16384), and datahike's
+budget clamp (0.8x cache) exists precisely so a warm cannot evict what it just
+fetched.
+
+At this scale the storage-side cold start is still comfortably inside budget —
+restore ~0.3 s + delta rewarm ~1.2 s — and what blows past 2 s is the DEMO
+ROUTE, which returns every note in one 6.2 MB response (1.1 s of query CPU
+plus serialization, paid on any server however warm). A paginated or point
+read serves within ~100 ms of listen. Size budgets to what the first REQUEST
+reads, not to the database.
+
+A tiered konserve store (memory/file/LMDB frontend over S3) generalizes the
+same property beyond the heap image: the warm populates the near tier, reads
+check it first, and — unlike the CRaC heap cache — a file/LMDB tier survives
+process death on platforms without snapshots. CRaC makes the heap the tier;
+tiered-LMDB is the portable spelling of the same idea. Not yet wired here.
+
 ## Operational notes
 
 - **S3 client sockets fail the checkpoint** (5 pooled keep-alives, observed via

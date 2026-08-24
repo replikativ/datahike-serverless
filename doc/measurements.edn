@@ -215,6 +215,15 @@
   :image-size-mb 347
   :caveat "laptop, tmpfs image, localhost MinIO+toxiproxy; first restore per host pays ~2s page-cache warm"}
 
+ ;; 50k-note tenant (~200k datoms, 1520 store objects, tree = 1174 nodes)
+ :crac-50k
+ {:store-cache 16384 :warm-budget 6000
+  :warm-cold-ms 2810 :warm-again-ms 120   ;; identical 1174 restores; hits cost nothing
+  :query-hot-ms 1124
+  :restore-fresh-ms [2401 3832]           ;; response is 6.2MB of ALL notes — route is O(db)
+  :restore-stale+1000-ms [3914 4262]      ;; rewarm 1157ms, listen +1092ms, rest = the 6.2MB response
+  :finding "storage-side cold start (restore ~0.3s + delta rewarm ~1.2s) stays in budget at 50k; the demo route's return-everything response is what exceeds 2s"}
+
  ;; ── The GC gap, quantified ──────────────────────────────────────────────
  ;; Reachable-set vs total objects for one tenant, before and after d/gc-storage.
  ;; A serverless deployment has nowhere to run GC (it must run in a writer JVM),
