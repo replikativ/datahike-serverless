@@ -222,7 +222,9 @@
   :query-hot-ms 1124
   :restore-fresh-ms [2401 3832]           ;; response is 6.2MB of ALL notes — route is O(db)
   :restore-stale+1000-ms [3914 4262]      ;; rewarm 1157ms, listen +1092ms, rest = the 6.2MB response
-  :finding "storage-side cold start (restore ~0.3s + delta rewarm ~1.2s) stays in budget at 50k; the demo route's return-everything response is what exceeds 2s"}
+  :finding "storage-side cold start (restore ~0.3s + delta rewarm ~1.2s) stays in budget at 50k; the demo route's return-everything response is what exceeds 2s"
+  ;; with the route paginated (rseek-datoms, newest-first, default 100):
+  :restore-stale+1000-paginated-ms [940 980 1120]}
 
  ;; ── The GC gap, quantified ──────────────────────────────────────────────
  ;; Reachable-set vs total objects for one tenant, before and after d/gc-storage.

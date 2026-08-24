@@ -15,7 +15,7 @@
   ;;   d/warm-db      every present index, one budget shared round-robin  <- used here
   ;; konserve arrives transitively (0.9.378 at this datahike version); do not pin it
   ;; at the top level unless you have a reason, a top-level pin wins over datahike's.
-  org.replikativ/datahike    {:mvn/version "0.8.1795"}
+  org.replikativ/datahike    {:mvn/version "0.8.1801"}
   org.replikativ/konserve-s3 {:mvn/version "0.1.38"}
 
   ;; Config as data — one aero file, two store profiles (resources/config.edn).
