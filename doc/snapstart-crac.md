@@ -69,6 +69,14 @@ plus serialization, paid on any server however warm). A paginated or point
 read serves within ~100 ms of listen. Size budgets to what the first REQUEST
 reads, not to the database.
 
+**The route fix, measured.** With the list route paginated (`rseek-datoms`
+newest-first, default 100, cap 1000 — reads proportional to the PAGE), the
+same 50k tenant, 1000 notes stale, serves a fresh first response in
+**0.94–1.12 s** end to end: criu restore, S3 reconnect, delta re-warm, jetty,
+first query. That is the complete cold-start story inside the 2 s budget at
+real scale — and the change was in the APP, not the storage: a cold start is
+as fast as the first request is small.
+
 A tiered konserve store (memory/file/LMDB frontend over S3) generalizes the
 same property beyond the heap image: the warm populates the near tier, reads
 check it first, and — unlike the CRaC heap cache — a file/LMDB tier survives
