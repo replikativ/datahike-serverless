@@ -12,7 +12,7 @@ with the conditions the number was taken under.
 
 ## Validated on AWS
 
-**[EACL](https://github.com/theronic/clj-eacl)** (Enterprise Access ControL —
+**[EACL](https://github.com/theronic/eacl)** (Enterprise Access ControL —
 a ReBAC authorization library by Petrus Theron, backed by Datahike) runs its v8
 demo on this approach in `us-east-1`, and reports:
 
